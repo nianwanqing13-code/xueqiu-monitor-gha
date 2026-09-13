@@ -13,15 +13,30 @@
 - **公开库 = 无限免费分钟**：建议把仓库设为 **Public**。这样 3 分钟 24/7 完全免费。仓库里只有老木匠的公开帖存档 + 状态文件，**不含任何 secret**（cookie/邮箱都在 GitHub Secrets 里，不入库），隐私无虞。
 - **私有库**：免费额度仅 **2000 分钟/月**。本方案每次任务约 18 分钟 runner 时间（两次抓取 + 3 分钟等待），私有库免费额度约只能撑 **每天 ~9 小时** 的 3 分钟监控。若要 24/7 又不想公开，要么付费买 Actions 分钟，要么退回 5 分钟粒度 / 仅交易时段运行。
 
-## 部署步骤（一次性）
-1. 在 GitHub 新建一个仓库（例如 `xueqiu-monitor-gha），**建议设为 Public** 以享无限免费 Actions 分钟（见「成本与仓库可见性」）。把本目录全部内容 push 上去。
-2. 仓库 → `Settings` → `Secrets and variables` → `Actions` → `New repository secret`，添加 4 个：
-   - `XUEQIU_COOKIES`：把你 PC 上 `Claw/xueqiu_sub/cookies.json` 的**全部内容**粘进来（一个 JSON 数组）。
-   - `QQ_USER`：你的 QQ 邮箱，如 `3196846119@qq.com`。
-   - `QQ_PASS`：QQ 邮箱 **SMTP 授权码**（不是登录密码）。
-   - `EMAIL_TO`：接收提醒的邮箱（填同一个 QQ 邮箱即可）。
-3. 仓库 → `Actions` 页面，找到 `雪球监控（老木匠）GitHub Actions 版`，点 `Run workflow` 手动跑一次验证。
-4. 验证通过后，PC 上原来的 `XueqiuMonitor_3min` 任务计划**建议停掉**，避免和云端双发。
+## 部署步骤（一次性，一键脚本）
+
+在 `xueqiu-gha` 目录下，用 PowerShell 跑一条命令即可全自动完成「建库 + 推代码 + 设 4 个 Secrets + 启用 workflow」：
+
+```powershell
+.\deploy.ps1 -GitHubToken "ghp_你的Token" -QQPass "你的QQ邮箱SMTP授权码"
+```
+
+- `-GitHubToken`：GitHub Personal Access Token（勾选 `repo` + `workflow` 权限），在 https://github.com/settings/tokens 生成。
+- `-QQPass`：QQ 邮箱 **SMTP 授权码**（不是登录密码）。本地 `email.json` 里该项为空，必须填。
+- 仓库默认 **Public**（无限免费分钟，见下）。要私有加 `-Visibility private`。
+- 脚本自动从 `../xueqiu_sub/cookies.json` 读取 cookie，无需手动复制。
+
+跑完它会提示最后一步：停掉 PC 上的 `XueqiuMonitor_3min` 任务防双发：
+
+```powershell
+schtasks /Delete /TN XueqiuMonitor_3min /F
+```
+
+### 手动兜底（若一键脚本失败）
+1. 在 GitHub 新建仓库（建议 Public），把本目录全部内容 push 上去。
+2. `Settings → Secrets and variables → Actions → New repository secret` 添加 4 个：`XUEQIU_COOKIES`（PC 上 `Claw/xueqiu_sub/cookies.json` 全文）、`QQ_USER=3196846119@qq.com`、`QQ_PASS`、`EMAIL_TO=3196846119@qq.com`。
+3. `Actions` 页面手动 `Run workflow` 验证一次。
+4. 停掉 PC 的 `XueqiuMonitor_3min` 任务。
 
 ## 日常维护
 - **cookie 过期**：雪球 cookie 会失效（几天~几周）。失效后 run.log（仓库里）会报 `WAF blocked` 或邮件停发。届时重新从雪球网页抓一份 cookie，更新 `XUEQIU_COOKIES` secret 即可，不用改代码。
