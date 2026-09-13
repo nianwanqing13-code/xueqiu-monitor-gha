@@ -77,14 +77,18 @@ jobs:
           git add xueqiu_sub/state.json xueqiu_sub/archive.md 2>/dev/null
           git diff --cached --quiet || { git commit -q -m "chore: update monitor state [skip ci]"; git push -q || true; }
 
-          # 自我接力：触发下一次运行，保证监控不间断
+          # 自我接力：触发下一次运行，保证监控不间断（失败重试 3 次）
           if [ -n "$GH_PAT" ]; then
-            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-              -H "Authorization: Bearer $GH_PAT" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/xueqiu-monitor.yml/dispatches" \
-              -d '{"ref":"main"}')
-            echo "self-chain dispatch HTTP $code"
+            for k in 1 2 3; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: Bearer $GH_PAT" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/xueqiu-monitor.yml/dispatches" \
+                -d '{"ref":"main"}')
+              echo "self-chain dispatch 第 $k 次 -> HTTP $code"
+              [ "$code" = "204" ] && break
+              sleep 10
+            done
           else
             echo "GH_PAT 未配置，跳过自我接力（将依赖 cron 兜底）"
           fi
