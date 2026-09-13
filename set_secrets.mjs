@@ -4,8 +4,8 @@
 import fs from 'fs';
 import https from 'https';
 import { createRequire } from 'module';
-const req = createRequire(import.meta.url);
-const nacl = req('C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl');
+const requireCJS = createRequire(import.meta.url);
+const nacl = requireCJS('C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl');
 
 function req(method, url, token, body) {
   return new Promise((resolve, reject) => {
