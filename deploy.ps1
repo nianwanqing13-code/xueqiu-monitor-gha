@@ -51,6 +51,9 @@ if (-not (Test-Path .git)) { git init -q }
 $remoteUrl = "https://$owner`:$GitHubToken@github.com/$owner/$RepoName.git"
 git remote remove origin 2>$null
 git remote add origin $remoteUrl
+git add -A
+git commit -q -m "xueqiu monitor: GitHub Actions 3-min cron (PC-off resilient)" 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Host "    (nothing new to commit)" }
 git branch -M main
 git push -q -f origin main
 Write-Host "    Code pushed to main."
