@@ -1,0 +1,16 @@
+{
+  "name": "xueqiu-monitor-gha",
+  "version": "1.0.0",
+  "description": "雪球用户「买股票的老木匠」主页监控 GitHub Actions 版：发现新帖自动存档并邮件提醒（PC 关机也不中断）",
+  "type": "module",
+  "main": "poll_xueqiu_10m.mjs",
+  "scripts": {
+    "start": "node poll_xueqiu_10m.mjs",
+    "once": "node poll_xueqiu_10m.mjs --once"
+  },
+  "keywords": ["xueqiu", "monitor", "github-actions"],
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}

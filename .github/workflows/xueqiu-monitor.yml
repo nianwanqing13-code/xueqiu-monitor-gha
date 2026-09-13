@@ -1,0 +1,55 @@
+name: 雪球监控（老木匠）GitHub Actions 版
+
+# 调度器跑在 GitHub 服务器上，与本地 PC 开关机无关。
+# 用户要求 3 分钟间隔：GitHub Actions 官方 cron 最小粒度是 5 分钟，
+# 故外层用确定可触发的 `*/5`，每次任务内跑两次、中间 sleep 180s，
+# 两次检查间隔 ≤3 分钟，且不受 GitHub cron 粒度限制。
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}   # 允许在 Actions 页面手动触发测试
+
+permissions:
+  contents: write        # 用于把 state.json / archive.md 回写进仓库
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖与 Chromium
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: 从 Secrets 注入 cookie 与邮箱配置
+        env:
+          XUEQIU_COOKIES: ${{ secrets.XUEQIU_COOKIES }}
+          QQ_USER: ${{ secrets.QQ_USER }}
+          QQ_PASS: ${{ secrets.QQ_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          mkdir -p xueqiu_sub
+          printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
+          printf '{"user":"%s","pass":"%s","to":"%s"}' "$QQ_USER" "$QQ_PASS" "$EMAIL_TO" > xueqiu_sub/email.json
+
+      - name: 运行监控（每 5 分钟窗口内查两次，等效 ≤3 分钟间隔）
+        run: |
+          node poll_xueqiu_10m.mjs --once
+          echo "等待 180 秒后补一次，缩小漏抓窗口..."
+          sleep 180
+          node poll_xueqiu_10m.mjs --once
+
+      - name: 回写状态（state.json / archive.md）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add xueqiu_sub/state.json xueqiu_sub/archive.md
+          git diff --cached --quiet || git commit -m "chore: update monitor state [skip ci]"
+          git push
