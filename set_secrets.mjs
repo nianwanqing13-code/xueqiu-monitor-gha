@@ -3,7 +3,9 @@
 // Usage: node set_secrets.mjs <token> <owner> <repo> <secretsJsonFile>
 import fs from 'fs';
 import https from 'https';
-import nacl from 'C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl';
+import { createRequire } from 'module';
+const req = createRequire(import.meta.url);
+const nacl = req('C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl');
 
 function req(method, url, token, body) {
   return new Promise((resolve, reject) => {
