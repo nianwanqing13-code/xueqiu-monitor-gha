@@ -1,9 +1,9 @@
 // set_secrets.mjs — Set GitHub Actions secrets via REST API using libsodium-style sealed-box.
 // Uses tweetnacl (X25519 + XSalsa20-Poly1305) to replicate crypto_box_seal.
 // Usage: node set_secrets.mjs <token> <owner> <repo> <secretsJsonFile>
-const fs = require('fs');
-const https = require('https');
-const nacl = require('C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl');
+import fs from 'fs';
+import https from 'https';
+import nacl from 'C:/Users/zhijian/.workbuddy/binaries/node/workspace/node_modules/tweetnacl';
 
 function req(method, url, token, body) {
   return new Promise((resolve, reject) => {
