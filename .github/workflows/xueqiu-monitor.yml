@@ -1,21 +1,31 @@
 name: 雪球监控（老木匠）GitHub Actions 版
 
 # 调度器跑在 GitHub 服务器上，与本地 PC 开关机无关。
-# 用户要求 3 分钟间隔：GitHub Actions 官方 cron 最小粒度是 5 分钟，
-# 故外层用确定可触发的 `*/5`，每次任务内跑两次、中间 sleep 180s，
-# 两次检查间隔 ≤3 分钟，且不受 GitHub cron 粒度限制。
+#
+# ⚠️ 重要经验（2026-09-13 实测）：GitHub Actions 的 cron 极不可靠。
+#    外层 `*/5` 实测 13 小时只触发了 1 次（中间空 5 小时），完全达不到 3/5 分钟粒度。
+#    因此本方案不依赖 cron 精度，改为「长驻循环 + 自我接力」：
+#      1) 单次任务内每 3 分钟查一次，连续跑约 5 小时 40 分（GitHub 单任务上限 6 小时）；
+#      2) 任务结束前用 PAT 调用 workflow_dispatch 触发下一次运行 → 链路自动续接，永不间断；
+#      3) cron 仅作「兜底重启」：万一自我接力失败，靠它把链路重新拉起来。
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch: {}   # 允许在 Actions 页面手动触发测试
+    - cron: '*/30 * * * *'   # 兜底：GitHub cron 不可靠，仅用于链路断了之后重启
+  workflow_dispatch: {}      # 允许手动触发 / 自我接力调用
 
 permissions:
-  contents: write        # 用于把 state.json / archive.md 回写进仓库
+  contents: write            # 回写 state.json / archive.md
+  actions: write             # 触发下一次 workflow run
+
+# 同一时刻只允许一个监控任务在跑；新的触发在队列里排队（GitHub 只保留 1 个 pending）
+concurrency:
+  group: xueqiu-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 355        # 上限 360，留 5 分钟余量给安装/收尾
     steps:
       - uses: actions/checkout@v4
 
@@ -39,17 +49,42 @@ jobs:
           printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
           printf '{"user":"%s","pass":"%s","to":"%s"}' "$QQ_USER" "$QQ_PASS" "$EMAIL_TO" > xueqiu_sub/email.json
 
-      - name: 运行监控（每 5 分钟窗口内查两次，等效 ≤3 分钟间隔）
+      - name: 持续轮询（每 3 分钟一查，连跑约 5 小时 40 分）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          node poll_xueqiu_10m.mjs --once
-          echo "等待 180 秒后补一次，缩小漏抓窗口..."
-          sleep 180
-          node poll_xueqiu_10m.mjs --once
-
-      - name: 回写状态（state.json / archive.md）
-        run: |
+          set +e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add xueqiu_sub/state.json xueqiu_sub/archive.md
-          git diff --cached --quiet || git commit -m "chore: update monitor state [skip ci]"
-          git push
+
+          DEADLINE=$(( $(date +%s) + 340*60 ))   # 约 5h40m
+          i=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            i=$((i+1))
+            echo "==================== cycle $i @ $(date -u +%H:%M:%S)Z ===================="
+            node poll_xueqiu_10m.mjs --once || echo "poll 退出码非 0（继续循环）"
+
+            # 每 ~7 轮（约 21 分钟）回写一次状态，保证进度持久化到仓库
+            if [ $((i % 7)) -eq 0 ]; then
+              git add xueqiu_sub/state.json xueqiu_sub/archive.md 2>/dev/null
+              git diff --cached --quiet || { git commit -q -m "chore: update monitor state [skip ci]"; git push -q || true; }
+            fi
+
+            sleep 140     # + 单次抓取耗时 ≈ 3 分钟一轮
+          done
+
+          # 收尾回写
+          git add xueqiu_sub/state.json xueqiu_sub/archive.md 2>/dev/null
+          git diff --cached --quiet || { git commit -q -m "chore: update monitor state [skip ci]"; git push -q || true; }
+
+          # 自我接力：触发下一次运行，保证监控不间断
+          if [ -n "$GH_PAT" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/xueqiu-monitor.yml/dispatches" \
+              -d '{"ref":"main"}')
+            echo "self-chain dispatch HTTP $code"
+          else
+            echo "GH_PAT 未配置，跳过自我接力（将依赖 cron 兜底）"
+          fi
