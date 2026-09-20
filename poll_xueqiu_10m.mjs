@@ -8,7 +8,8 @@ import { sendEmail } from './smtp_qq.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 可移植：使用运行本脚本的同一个 node 进程，不再写死 Windows 路径
 const NODE = process.execPath;
-const FETCH = path.join(__dirname, 'fetch_xueqiu.mjs');
+const FETCH_HTTP = path.join(__dirname, 'fetch_xueqiu_http.mjs'); // 快路径：纯 HTTP，不启浏览器
+const FETCH = path.join(__dirname, 'fetch_xueqiu.mjs');           // 兜底：浏览器，可刷新过期 cookie
 const STATE = path.join(__dirname, 'xueqiu_sub', 'state.json');
 const ARCHIVE = path.join(__dirname, 'xueqiu_sub', 'archive.md');
 const EMAIL_CFG = path.join(__dirname, 'xueqiu_sub', 'email.json');
@@ -31,19 +32,28 @@ function logRun(level, msg) {
   try { fs.appendFileSync(RUN_LOG, `${cst()} [${level}] ${msg}\n`); } catch { /* 写日志失败不影响主流程 */ }
 }
 
+// 跑单个 fetch 脚本并解析其 JSON 输出
+async function runFetchScript(script, timeout) {
+  const { stdout } = await execFileP(NODE, [script], { env: process.env, timeout, maxBuffer: 16 * 1024 * 1024 });
+  const a = stdout.indexOf('{');
+  const b = stdout.lastIndexOf('}');
+  if (a < 0 || b < 0) throw new Error('fetch 无 JSON 输出');
+  const json = JSON.parse(stdout.slice(a, b + 1));
+  if (json.ok && json.posts) return json;
+  throw new Error(json.reason || '抓取失败');
+}
+
 async function fetchPosts() {
-  // 子进程偶发超时/被强杀时重试 2 次，降低单次抖动导致的漏抓
+  // 快路径：纯 HTTP 请求（秒级完成，不启浏览器 —— 资源占用与指纹暴露都最小）
+  try {
+    return await runFetchScript(FETCH_HTTP, 40000);
+  } catch { /* 失败则落到浏览器路径（能刷新过期 cookie / 过 WAF 挑战） */ }
+
+  // 慢路径：浏览器抓取；子进程偶发超时/被强杀时重试，降低单次抖动导致的漏抓
   let lastErr;
   for (let i = 0; i < 3; i++) {
     try {
-      const { stdout } = await execFileP(NODE, [FETCH], { env: process.env, timeout: 150000, maxBuffer: 16 * 1024 * 1024 });
-      const a = stdout.indexOf('{');
-      const b = stdout.lastIndexOf('}');
-      if (a < 0 || b < 0) throw new Error('fetch 无 JSON 输出');
-      const json = JSON.parse(stdout.slice(a, b + 1));
-      if (json.ok && json.posts) return json;
-      if (i < 2) { await new Promise(r => setTimeout(r, 3000)); continue; }
-      throw new Error(json.reason || '抓取失败');
+      return await runFetchScript(FETCH, 150000);
     } catch (e) {
       lastErr = e;
       if (i < 2) await new Promise(r => setTimeout(r, 3000));
@@ -73,15 +83,63 @@ function loadEmailCfg() {
   try { return JSON.parse(fs.readFileSync(EMAIL_CFG, 'utf8')); } catch { return null; }
 }
 
+// —— 断档检测 ——
+// 正常节奏约 3 分钟一轮。若「上次成功检查」距今明显超出，说明监控中断过
+// （PC 关机休眠 / 云端抓取持续失败），必须让用户知道，否则会像 9/16 那次静默漏 4 天。
+const GAP_WARN_MIN = 30;    // 超过 30 分钟：在邮件顶部加中断提示
+const GAP_NOTIFY_MIN = 30;  // 超过 30 分钟且本轮无新帖：单独发一封「已恢复」通知（PC 睡眠/关机也会触发）
+
+function fmtGap(min) {
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? `${h} 小时 ${m} 分钟` : `${h} 小时`;
+  const d = Math.floor(h / 24), hh = h % 24;
+  return hh ? `${d} 天 ${hh} 小时` : `${d} 天`;
+}
+
+async function notify(subject, text, tag) {
+  const cfg = loadEmailCfg();
+  if (!cfg || !cfg.user || !cfg.pass) {
+    console.log(`[${now()}] 未配置邮箱，跳过邮件（如需提醒请提供 email.json）`);
+    return;
+  }
+  const to = cfg.to || cfg.user;
+  try {
+    await sendEmail({ user: cfg.user, pass: cfg.pass, to, subject, text });
+    console.log(`[${now()}] 已发邮件提醒 -> ${to}`);
+    logRun('MAIL', `${tag} -> ${to}`);
+  } catch (e) {
+    console.log(`[${now()}] 邮件发送失败: ${e.message}`);
+    logRun('MAIL_FAIL', `邮件发送失败 ${e.message}`);
+  }
+}
+
 async function runOnce() {
   try {
     const json = await fetchPosts();
     const state = loadState();
     const seen = new Set(state.seen_post_ids || []);
     const fresh = (json.posts || []).filter(p => !seen.has(p.id));
+
+    // 断档检测：对比「上次成功检查」，识别 PC 关机 / 云端抓取失败造成的监控空窗
+    const prevMs = state.last_check ? Date.parse(state.last_check) : 0;
+    const gapMin = prevMs ? Math.round((Date.now() - prevMs) / 60000) : 0;
+    const gapNote = gapMin >= GAP_WARN_MIN
+      ? `⚠️ 监控中断提示：上次成功检查在 ${fmtGap(gapMin)} 前（正常约 3 分钟一轮），期间可能漏抓。\n`
+        + `雪球接口只开放最新 20 条发言，更早的无法回溯补档，请留意。\n\n`
+      : '';
+
     if (fresh.length === 0) {
       console.log(`[${now()}] 无新帖（本次 ${json.posts.length} 条）`);
       logRun('OK', `无新帖 本次${json.posts.length}条`);
+      // 长时间断档后即使没有新帖也告知一声，避免静默失效无人察觉
+      if (gapMin >= GAP_NOTIFY_MIN) {
+        await notify(
+          `雪球监控已恢复（此前中断约 ${fmtGap(gapMin)}）`,
+          `${gapNote}本次检查未发现新帖。\n\n检查时间：${cst()}`,
+          `断档恢复通知(${fmtGap(gapMin)})`
+        );
+      }
     } else {
       fresh.sort((a, b) => b.created_at - a.created_at); // 新→旧
       prependArchive(fresh);
@@ -89,23 +147,14 @@ async function runOnce() {
       state.seen_post_ids = [...seen];
       console.log(`[${now()}] 发现 ${fresh.length} 条新帖，已存档`);
       logRun('NEW', `发现${fresh.length}条新帖 已存档`);
-      const cfg = loadEmailCfg();
-      if (cfg && cfg.user && cfg.pass) {
-        try {
-          const to = cfg.to || cfg.user;
-          const body = fresh.map(p =>
-            `${p.time_cst}\n${p.text}\nhttps://xueqiu.com/${USER_ID}/${p.id}`
-          ).join('\n\n---\n\n');
-          await sendEmail({ user: cfg.user, pass: cfg.pass, to, subject: `雪球新发言：买股票的老木匠（${fresh.length}条）`, text: body });
-          console.log(`[${now()}] 已发邮件提醒 -> ${to}`);
-          logRun('MAIL', `已发邮件 -> ${to}`);
-        } catch (e) {
-          console.log(`[${now()}] 邮件发送失败: ${e.message}`);
-          logRun('MAIL_FAIL', `邮件发送失败 ${e.message}`);
-        }
-      } else {
-        console.log(`[${now()}] 未配置邮箱，跳过邮件（如需提醒请提供 email.json）`);
-      }
+      const body = fresh.map(p =>
+        `${p.time_cst}\n${p.text}\nhttps://xueqiu.com/${USER_ID}/${p.id}`
+      ).join('\n\n---\n\n');
+      await notify(
+        `雪球新发言：买股票的老木匠（${fresh.length}条）`,
+        gapNote + body,
+        `已发邮件(${fresh.length}条)`
+      );
     }
     state.last_check = now();
     saveState(state);
@@ -133,7 +182,7 @@ function takeLock() {
 function releaseLock() { try { fs.unlinkSync(LOCK_FILE); } catch {} }
 
 async function main() {
-  // --once：单次运行后立即退出，适合 GitHub Actions cron（每5分钟调度一次）
+  // --once：单次运行后立即退出，适合 GitHub Actions 长循环（每3分钟一轮）
   if (process.argv.includes('--once')) {
     console.log(`[${now()}] --once 单次运行`);
     if (!takeLock()) {
