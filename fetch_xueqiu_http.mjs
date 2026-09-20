@@ -39,7 +39,7 @@ function httpGet(url, cookie, timeoutMs = 25000) {
       let data = '';
       res.setEncoding('utf8');
       res.on('data', c => { data += c; });
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
@@ -52,7 +52,14 @@ let result = { ok: false, reason: 'no cookies' };
 if (cookies.length) {
   const url = `https://xueqiu.com/statuses/user_timeline.json?user_id=${USER_ID}&page=1&size=20&type=status&_=${Date.now()}`;
   try {
-    const r = await httpGet(url, cookieHeader(cookies));
+    let r = await httpGet(url, cookieHeader(cookies));
+    // 关键：雪球对海外 IP 会把 xueqiu.com 302 到 www.xueqiu.com。
+    // 必须跟随重定向，否则只拿到那页 302 的 HTML —— 这正是云端一直失败的原因
+    // （2026-09-20 实测：GitHub Actions 出口 IP 请求 xueqiu.com 得 302，请求 www 得 200 + JSON）。
+    if (r.status >= 300 && r.status < 400 && r.headers && r.headers.location) {
+      const target = new URL(r.headers.location, url).href;
+      r = await httpGet(target, cookieHeader(cookies));
+    }
     let j = null;
     try { j = JSON.parse(r.body); } catch { /* 非 JSON = 多半是 WAF 挑战页 */ }
     if (j && j.statuses) {
