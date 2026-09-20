@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  diag-linux:
+  probe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,54 +15,30 @@ jobs:
         run: |
           mkdir -p xueqiu_sub
           printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
-          echo "cookie 字节数: $(wc -c < xueqiu_sub/cookies.json)"
 
-      - name: 详细诊断（Linux runner）
+      - name: 多端点探测
         run: |
           COOKIE=$(node -e "const c=require('./xueqiu_sub/cookies.json');console.log(c.filter(x=>String(x.domain).includes('xueqiu')).map(x=>x.name+'='+x.value).join('; '))")
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          echo "=== 出口 IP ==="
-          curl -s --max-time 20 https://api.ipify.org || echo "(失败)"
-          echo ""
-          echo "=== 1) API 响应头（看 302 去哪）==="
-          curl -s -o /dev/null -D - --max-time 25 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H "X-Requested-With: XMLHttpRequest" \
-            "https://xueqiu.com/statuses/user_timeline.json?user_id=3058599833&page=1&size=20&type=status" | head -18
-          echo ""
-          echo "=== 2) 跟随重定向后的最终内容 ==="
-          curl -sL --max-time 35 -o follow.txt -w "final_url=%{url_effective} code=%{http_code}\n" -H "Cookie: $COOKIE" -H "User-Agent: $UA" \
-            "https://xueqiu.com/statuses/user_timeline.json?user_id=3058599833&page=1&size=20&type=status" || true
-          head -c 400 follow.txt
-          echo ""
-          echo "=== 3) 雪球主站可达性 ==="
-          curl -s -o home.html -w "home_code=%{http_code}\n" --max-time 25 -H "User-Agent: $UA" "https://xueqiu.com/" || true
-          head -c 200 home.html
-          echo ""
-          echo "=== 4) node 纯 HTTP 抓取（正式脚本）==="
-          node fetch_xueqiu_http.mjs 2>&1 | head -c 500
-
-  diag-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 注入 cookie
-        env:
-          XUEQIU_COOKIES: ${{ secrets.XUEQIU_COOKIES }}
-        run: |
-          mkdir -p xueqiu_sub
-          printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
-          echo "cookie 字节数: $(wc -c < xueqiu_sub/cookies.json)"
-
-      - name: 详细诊断（macOS runner，IP 段不同）
-        run: |
-          COOKIE=$(node -e "const c=require('./xueqiu_sub/cookies.json');console.log(c.filter(x=>String(x.domain).includes('xueqiu')).map(x=>x.name+'='+x.value).join('; '))")
-          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          echo "=== 出口 IP ==="
-          curl -s --max-time 20 https://api.ipify.org || echo "(失败)"
-          echo ""
-          echo "=== 1) API 响应头 ==="
-          curl -s -o /dev/null -D - --max-time 25 -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H "X-Requested-With: XMLHttpRequest" \
-            "https://xueqiu.com/statuses/user_timeline.json?user_id=3058599833&page=1&size=20&type=status" | head -18
-          echo ""
-          echo "=== 2) node 纯 HTTP 抓取（正式脚本）==="
-          node fetch_xueqiu_http.mjs 2>&1 | head -c 500
+          probe() {
+            echo "--- $1"
+            curl -s -o r.txt -w "    code=%{http_code} size=%{size_download} redirect=%{redirect_url}\n" --max-time 20 \
+              -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H "X-Requested-With: XMLHttpRequest" "$1" || echo "    (curl 失败)"
+            head -c 160 r.txt; echo ""
+          }
+          Q="user_id=3058599833&page=1&size=20&type=status"
+          probe "https://xueqiu.com/statuses/user_timeline.json?$Q"
+          probe "https://www.xueqiu.com/statuses/user_timeline.json?$Q"
+          probe "https://api.xueqiu.com/statuses/user_timeline.json?$Q"
+          probe "https://xueqiu.com/v4/statuses/user_timeline.json?$Q"
+          probe "https://stock.xueqiu.com/v5/stock/quote.json?symbol=SH600519&extend=detail"
+          echo "--- 带 Referer"
+          curl -s -o r.txt -w "    code=%{http_code} size=%{size_download} redirect=%{redirect_url}\n" --max-time 20 \
+            -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H "X-Requested-With: XMLHttpRequest" -H "Referer: https://xueqiu.com/u/3058599833" \
+            "https://xueqiu.com/statuses/user_timeline.json?$Q" || true
+          head -c 160 r.txt; echo ""
+          echo "--- HTTP/1.1"
+          curl -s --http1.1 -o r.txt -w "    code=%{http_code} size=%{size_download} redirect=%{redirect_url}\n" --max-time 20 \
+            -H "Cookie: $COOKIE" -H "User-Agent: $UA" -H "X-Requested-With: XMLHttpRequest" \
+            "https://xueqiu.com/statuses/user_timeline.json?$Q" || true
+          head -c 160 r.txt; echo ""
