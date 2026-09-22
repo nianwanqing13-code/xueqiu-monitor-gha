@@ -1,13 +1,13 @@
-name: 雪球监控（老木匠）GitHub Actions 版
+name: 雪球监控（GitHub Actions 版）
 
-# 调度器跑在 GitHub 服务器上，与本地 PC 开关机无关。
+# 调度器跑在 GitHub 服务器上，与本地电脑开关机无关。
 #
-# ⚠️ 重要经验（2026-09-13 实测）：GitHub Actions 的 cron 极不可靠。
+# ⚠️ 重要经验（实测）：GitHub Actions 的 cron 极不可靠。
 #    外层 `*/5` 实测 13 小时只触发了 1 次（中间空 5 小时），完全达不到 3/5 分钟粒度。
 #    因此本方案不依赖 cron 精度，改为「长驻循环 + 自我接力」：
-#      1) 单次任务内每 3 分钟查一次，连续跑约 5 小时 40 分（GitHub 单任务上限 6 小时）；
-#      2) 任务结束前用 PAT 调用 workflow_dispatch 触发下一次运行 → 链路自动续接，永不间断；
-#      3) cron 仅作「兜底重启」：万一自我接力失败，靠它把链路重新拉起来。
+#      1) 单次任务内每 3 分钟查一次，连着跑约 5 小时 40 分（GitHub 单个任务上限 6 小时）；
+#      2) 任务结束前用 PAT 调 workflow_dispatch 触发下一次运行 → 链路自动续接、永不间断；
+#      3) cron 只作「兜底重启」：万一自我接力失败，靠它把链路重新拉起来。
 on:
   schedule:
     - cron: '*/30 * * * *'   # 兜底：GitHub cron 不可靠，仅用于链路断了之后重启
@@ -17,7 +17,7 @@ permissions:
   contents: write            # 回写 state.json / archive.md
   actions: write             # 触发下一次 workflow run
 
-# 同一时刻只允许一个监控任务在跑；新的触发在队列里排队（GitHub 只保留 1 个 pending）
+# 同一时刻只允许一个监控任务在跑；新的触发进队列排队（GitHub 只保留 1 个 pending）
 concurrency:
   group: xueqiu-monitor
   cancel-in-progress: false
@@ -49,9 +49,12 @@ jobs:
           printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
           printf '{"user":"%s","pass":"%s","to":"%s"}' "$QQ_USER" "$QQ_PASS" "$EMAIL_TO" > xueqiu_sub/email.json
 
+      - name: 起始状态快照（把上一轮的健康状态打进日志，便于排查）
+        run: node poll_xueqiu_10m.mjs --status || true
+
       - name: 持续轮询（每 3 分钟一查，连跑约 5 小时 40 分）
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}   # 用于自我接力；GITHUB_TOKEN 无法触发新 run
         run: |
           set +e
           git config user.name "github-actions[bot]"
@@ -65,8 +68,11 @@ jobs:
             node poll_xueqiu_10m.mjs --once || echo "poll 退出码非 0（继续循环）"
 
             # 每 ~7 轮（约 21 分钟）回写一次状态，保证进度持久化到仓库
+            # ⚠️ health.json / deliveries.json 必须一起提交：
+            #    health.json  = 看门狗判活的依据（不提交则看门狗永远认为监控死了）
+            #    deliveries.json = 投递队列，跨运行保持，失败重试靠它
             if [ $((i % 7)) -eq 0 ]; then
-              git add xueqiu_sub/state.json xueqiu_sub/archive.md 2>/dev/null
+              git add xueqiu_sub/state.json xueqiu_sub/archive.md xueqiu_sub/health.json xueqiu_sub/deliveries.json 2>/dev/null
               git diff --cached --quiet || { git commit -q -m "chore: update monitor state [skip ci]"; git push -q || true; }
             fi
 
@@ -74,7 +80,7 @@ jobs:
           done
 
           # 收尾回写
-          git add xueqiu_sub/state.json xueqiu_sub/archive.md 2>/dev/null
+          git add xueqiu_sub/state.json xueqiu_sub/archive.md xueqiu_sub/health.json xueqiu_sub/deliveries.json 2>/dev/null
           git diff --cached --quiet || { git commit -q -m "chore: update monitor state [skip ci]"; git push -q || true; }
 
           # 自我接力：触发下一次运行，保证监控不间断（失败重试 3 次）
