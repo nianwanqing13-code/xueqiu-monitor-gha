@@ -1,27 +1,29 @@
 // poll_xueqiu_10m.mjs — 轮询主进程（云部署 / 本地部署 通用，同一份代码）
 //
-// 两种跑法：
+// 三种跑法：
 //   1) node poll_xueqiu_10m.mjs            → 常驻进程，每 10 分钟自查一轮
 //   2) node poll_xueqiu_10m.mjs --once     → 只跑一次就退出，交给系统定时器调度（推荐）
 //   3) node poll_xueqiu_10m.mjs --status   → 只打印当前健康状态，不抓取（排查用）
 //
 // 单轮做的事（顺序很重要）：
 //   ① 先补发投递队列里欠的邮件（上轮发失败的这一轮补上）
-//   ② 抓取 → 比对 state.json 去重
+//   ② 抓取 → 比对 state.json + notified_ids 双重去重 → 冷数据守卫
 //   ③ 有新帖/需告警 → 先写入投递队列（落盘），再尝试发送
 //   ④ 更新 health.json（心跳、连续失败数、抓取源状态）
 //
-// 设计要点（稳定性三件套，参考成熟订阅平台的做法）：
-//   · 投递队列 deliveries.json —— 抓取与投递解耦，投递有记录、失败自动退避重试，不再发失败就丢
-//   · health.json —— 每轮落一份可被外部读取的健康快照，供 watchdog 独立判活
-//   · 抓取源状态 —— 连续失败会升级为 degraded/error，恢复时自动回 ok
+// 稳定性设计（参考成熟订阅服务的做法）：
+//   · 投递队列 deliveries.json —— 抓取与投递解耦；失败退避重试，不再「发失败就丢」
+//   · 幂等键 dedupe_key + 已通知名单 notified_ids —— 杜绝重复发信（state 丢失/回退也不怕）
+//   · 冷数据守卫 —— 超过 cold_post_hours 的旧帖只归档不发通知，防历史倒灌刷屏
+//   · 清理只删终态 —— 裁剪记录时绝不丢 pending，避免静默漏通知
+//   · health.json —— 每轮落盘的可读健康快照，供 watchdog 独立判活
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendEmail } from './smtp_qq.mjs';
-import { USER_ID, USER_NAME } from './config.mjs';
+import { USER_ID, USER_NAME, COLD_POST_HOURS } from './config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 可移植：用运行本脚本的同一个 node 进程，不写死任何绝对路径
@@ -39,8 +41,9 @@ const LOCK_FILE = path.join(__dirname, 'xueqiu_sub', '.poll_lock');
 const LOCK_MAX_AGE = 540 * 1000; // 锁超过 9 分钟视为陈旧自动失效（覆盖最坏抓取时长）
 
 // —— 投递队列参数 ——
-const MAX_ATTEMPTS = 5;      // 单封邮件最多尝试 5 次，之后标记 dead（不再无休止重试）
-const DELIVERY_KEEP = 200;   // 队列最多保留 200 条记录
+const MAX_ATTEMPTS = 5;        // 单封邮件最多尝试 5 次，之后标记 dead（不再无休止重试）
+const DELIVERY_KEEP = 200;     // 「终态」记录最多保留条数（pending 永不裁剪）
+const NOTIFIED_KEEP = 2000;    // 已通知帖子 ID 保留条数上限
 
 const execFileP = promisify(execFile);
 const now = () => new Date().toISOString();
@@ -69,11 +72,20 @@ function saveJson(file, obj) {
 // 再尝试发送；失败则按退避重试，直到成功或达到上限（dead，可在队列里看到）。
 function loadDeliveries() {
   const d = loadJson(DELIVERIES, null);
-  if (!d || !Array.isArray(d.items)) return { items: [] };
+  if (!d || !Array.isArray(d.items)) return { items: [], notified_ids: [] };
+  if (!Array.isArray(d.notified_ids)) d.notified_ids = [];
   return d;
 }
+
+// 清理时「只删终态」：sent/dead 可以裁剪，pending 一条都不能丢
+// （丢了就是静默漏通知 —— 参考实现里明确强调过这一点）
 function saveDeliveries(d) {
-  if (d.items.length > DELIVERY_KEEP) d.items = d.items.slice(-DELIVERY_KEEP);
+  const done = d.items.filter(it => it.status !== 'pending');
+  const keepDone = new Set(done.slice(-DELIVERY_KEEP));
+  d.items = d.items.filter(it => it.status === 'pending' || keepDone.has(it));
+  if (Array.isArray(d.notified_ids) && d.notified_ids.length > NOTIFIED_KEEP) {
+    d.notified_ids = d.notified_ids.slice(-NOTIFIED_KEEP);
+  }
   saveJson(DELIVERIES, d);
 }
 
@@ -82,11 +94,22 @@ function backoffMs(attempts) {
   return Math.min(60, Math.pow(2, Math.max(0, attempts - 1)) * 2) * 60 * 1000;
 }
 
-function enqueue(subject, text, kind) {
+// 入队。postIds 用于两件事：① 生成幂等键，防同一批帖子重复入队；② 发送成功后写入 notified_ids
+function enqueue(subject, text, kind, postIds = []) {
   const d = loadDeliveries();
+  const ids = [...new Set((postIds || []).map(String))].sort();
+  const dedupe_key = ids.length ? `${kind}|${ids.join(',')}` : null;
+
+  // 幂等：同一批帖子的通知若已在队列里（不论待发还是已发），不再重复入队
+  if (dedupe_key && d.items.some(it => it.dedupe_key === dedupe_key)) {
+    console.log(`[${now()}] 幂等命中：该批通知已存在，跳过重复入队（${kind}）`);
+    logRun('DEDUPE', `跳过重复入队 ${kind}`);
+    return null;
+  }
+
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   d.items.push({
-    id, kind, subject, text,
+    id, kind, subject, text, post_ids: ids, dedupe_key,
     created_at: now(),
     status: 'pending',
     attempts: 0,
@@ -122,6 +145,12 @@ async function flushDeliveries() {
       it.status = 'sent';
       it.sent_at = now();
       it.last_error = null;
+      // 发送成功才把帖子 ID 记入「已通知」名单 —— 这是幂等的事实依据
+      if (it.post_ids && it.post_ids.length) {
+        const set = new Set(d.notified_ids || []);
+        for (const pid of it.post_ids) set.add(String(pid));
+        d.notified_ids = [...set];
+      }
       sent++;
       console.log(`[${now()}] 邮件已发（第 ${it.attempts} 次尝试）-> ${to}`);
       logRun('MAIL', `${it.kind} 已发（尝试${it.attempts}次）`);
@@ -144,9 +173,15 @@ async function flushDeliveries() {
 }
 
 function deliveryStats() {
-  const items = loadDeliveries().items;
-  const by = s => items.filter(x => x.status === s).length;
-  return { total: items.length, pending: by('pending'), sent: by('sent'), dead: by('dead') };
+  const d = loadDeliveries();
+  const by = s => d.items.filter(x => x.status === s).length;
+  return {
+    total: d.items.length,
+    pending: by('pending'),
+    sent: by('sent'),
+    dead: by('dead'),
+    notified_ids: (d.notified_ids || []).length
+  };
 }
 
 // ============ ② health.json：供外部独立判活 ============
@@ -238,14 +273,17 @@ async function runOnce() {
     logRun('QUEUE_FAIL', `补发异常 ${e.message}`);
   }
 
-  let fetchOk = false, errMsg = null;
+  let fetchOk = false, errMsg = null, coldSuppressed = 0;
   try {
     const json = await fetchPosts();
     fetchOk = true;
 
     const state = loadState();
     const seen = new Set(state.seen_post_ids || []);
-    const fresh = (json.posts || []).filter(p => !seen.has(p.id));
+    const notified = new Set(loadDeliveries().notified_ids || []);
+    // 双重去重：seen（已处理过）+ notified（已成功通知过）。
+    // 两个名单存在不同文件里，任一丢失都不会导致重复发信。
+    const fresh = (json.posts || []).filter(p => !seen.has(p.id) && !notified.has(p.id));
 
     // 断档检测：对比「上次成功检查」，识别 PC 关机 / 云端抓取失败造成的监控空窗
     const prevMs = state.last_check ? Date.parse(state.last_check) : 0;
@@ -268,19 +306,35 @@ async function runOnce() {
       }
     } else {
       fresh.sort((a, b) => b.created_at - a.created_at); // 新→旧
-      prependArchive(fresh);
+      prependArchive(fresh);                              // 全部归档（冷数据也留档，不丢内容）
       for (const p of fresh) seen.add(p.id);
       state.seen_post_ids = [...seen];
-      console.log(`[${now()}] 发现 ${fresh.length} 条新帖，已存档`);
-      logRun('NEW', `发现${fresh.length}条新帖 已存档`);
-      const body = fresh.map(p =>
-        `${p.time_cst}\n${p.text}\nhttps://xueqiu.com/${USER_ID}/${p.id}`
-      ).join('\n\n---\n\n');
-      enqueue(
-        `雪球新发言：${USER_NAME}（${fresh.length}条）`,
-        gapNote + body,
-        `新帖(${fresh.length}条)`
-      );
+
+      // 冷数据守卫：超期旧帖只归档、不发即时通知。
+      // 防的是「state 丢失/回退 → 历史被当成新帖一次性倒灌进邮箱」这类事故。
+      const cutoffMs = Date.now() - COLD_POST_HOURS * 3600 * 1000;
+      const hot = fresh.filter(p => Number(p.created_at) >= cutoffMs);
+      coldSuppressed = fresh.length - hot.length;
+      if (coldSuppressed > 0) {
+        console.log(`[${now()}] 冷数据守卫：${coldSuppressed} 条超过 ${COLD_POST_HOURS} 小时的旧帖只归档、不推送`);
+        logRun('COLD', `跳过 ${coldSuppressed} 条超期旧帖（>${COLD_POST_HOURS}h）仅归档`);
+      }
+
+      if (hot.length) {
+        console.log(`[${now()}] 发现 ${hot.length} 条新帖，已存档`);
+        logRun('NEW', `发现${hot.length}条新帖 已存档`);
+        const body = hot.map(p =>
+          `${p.time_cst}\n${p.text}\nhttps://xueqiu.com/${USER_ID}/${p.id}`
+        ).join('\n\n---\n\n');
+        enqueue(
+          `雪球新发言：${USER_NAME}（${hot.length}条）`,
+          gapNote + body,
+          `新帖(${hot.length}条)`,
+          hot.map(p => p.id)
+        );
+      } else {
+        console.log(`[${now()}] 本轮 ${fresh.length} 条均为超期旧帖，仅归档不推送`);
+      }
     }
     state.last_check = now();
     saveState(state);
@@ -294,7 +348,6 @@ async function runOnce() {
   // ④ 更新健康快照
   const h = loadHealth();
   const failures = fetchOk ? 0 : (Number(h.consecutive_failures) || 0) + 1;
-  const st = deliveryStats();
   saveHealth({
     last_run_at: now(),
     last_success_at: fetchOk ? now() : (h.last_success_at || null),
@@ -302,7 +355,9 @@ async function runOnce() {
     consecutive_failures: failures,
     source_status: sourceStatusFromFailures(failures),
     last_error: fetchOk ? null : errMsg,
-    deliveries: st,
+    cold_post_hours: COLD_POST_HOURS,
+    last_suppressed_cold: coldSuppressed,
+    deliveries: deliveryStats(),
     seen_count: (loadState().seen_post_ids || []).length,
     monitor: { user_id: USER_ID, user_name: USER_NAME }
   });
@@ -347,11 +402,20 @@ function printStatus() {
   console.log(`最后运行     : ${ago(h.last_run_at)}`);
   if (h.last_error) console.log(`最近错误     : ${h.last_error}`);
   console.log(`投递队列     : 待发 ${st.pending} / 已发 ${st.sent} / 放弃 ${st.dead}（共 ${st.total} 条）`);
+  console.log(`已通知帖数   : ${st.notified_ids}（幂等名单，防重复发信）`);
+  console.log(`冷数据守卫   : 超 ${h.cold_post_hours || COLD_POST_HOURS} 小时只归档不发；上轮跳过 ${h.last_suppressed_cold || 0} 条`);
   console.log(`已读帖子数   : ${h.seen_count || (loadState().seen_post_ids || []).length}`);
   const dead = loadDeliveries().items.filter(x => x.status === 'dead');
   if (dead.length) {
     console.log('--- 已放弃的投递（需人工介入）---');
     for (const x of dead.slice(-5)) console.log(`  ${x.created_at}  ${x.subject}  最后错误: ${x.last_error}`);
+  }
+  const pendingNow = loadDeliveries().items.filter(x => x.status === 'pending');
+  if (pendingNow.length) {
+    console.log('--- 待发（会自动重试）---');
+    for (const x of pendingNow.slice(-5)) {
+      console.log(`  ${x.created_at}  ${x.subject}  已试 ${x.attempts} 次${x.last_error ? `  最后错误: ${x.last_error}` : ''}`);
+    }
   }
 }
 
