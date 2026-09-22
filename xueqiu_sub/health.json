@@ -1,0 +1,20 @@
+{
+    "updated_at":  "2026-09-22T15:38:30.910Z",
+    "monitor":  {
+                    "user_id":  "3058599833",
+                    "user_name":  "买股票的老木匠"
+                },
+    "seen_count":  0,
+    "last_fetch_ok":  null,
+    "last_run_at":  null,
+    "deliveries":  {
+                       "sent":  0,
+                       "pending":  0,
+                       "dead":  0,
+                       "total":  0
+                   },
+    "last_error":  null,
+    "consecutive_failures":  0,
+    "source_status":  "init",
+    "last_success_at":  "2026-09-22T15:38:30.910Z"
+}
