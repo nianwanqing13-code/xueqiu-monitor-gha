@@ -47,6 +47,11 @@ node watchdog.mjs --verbose       # 独立看门狗：从外部读 health.json �
 
 - **投递队列** `xueqiu_sub/deliveries.json`：通知先入队落盘再发送；失败按 2/4/8/16/32/60 分钟退避重试，
   最多 5 次，超限标记 `dead`（`--status` 会单独列出）。进程被杀、SMTP 抖动都不会丢消息。
+- **幂等键 `dedupe_key` + 已通知名单 `notified_ids`**：同一批帖子的通知只入队一次；
+  只有**发送成功**才把帖子 ID 记入 `notified_ids`。所以 `state.json` 丢失或被回退也**不会重复发信**。
+- **冷数据守卫 `cold_post_hours`（默认 72 小时）**：超过这个时间的旧帖只归档、不发通知，
+  防「名单丢失 → 历史倒灌刷屏」；顺带挡掉雪球的置顶老帖。
+- **清理只删终态**：裁剪队列时只裁 `sent`/`dead`，`pending` 永不丢 —— 否则清理本身会变成漏通知的原因。
 - **健康快照** `xueqiu_sub/health.json`：每轮刷新，记录最后成功检查时间、连续失败数、抓取源状态、
   投递队列统计。`--status` 读的就是它。
 - **独立看门狗** `watchdog.mjs`：放在监控之外（另一台机器/另一个调度），按 `health.json` 判活，
