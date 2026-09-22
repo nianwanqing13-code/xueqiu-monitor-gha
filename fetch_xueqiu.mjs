@@ -1,11 +1,16 @@
+// fetch_xueqiu.mjs — 浏览器抓取（慢路径 / 兜底）
+//
+// 作用有两个，都是纯 HTTP 快路径做不到的：
+//   1. cookie 失效或从未生成时，用无头 Chromium 打开主页，自动拿一份新 cookie 存到 cookies.json；
+//   2. 遇上 WAF 挑战页时，靠真实浏览器环境过掉。
+// 代价：一轮约 5 秒以上，且要装 Chromium（约 150MB）。所以正常情况走快路径，这里只兜底。
 import { chromium } from 'playwright';
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { USER_ID, USER_URL } from './config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const USER_ID = '3058599833';
-const USER_URL = `https://xueqiu.com/u/${USER_ID}`;
 const COOKIE_FILE = join(__dirname, 'xueqiu_sub', 'cookies.json');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -82,7 +87,6 @@ if (data && data.statuses) {
     const bj = new Date(ms + 8 * 3600 * 1000);
     const pad = n => String(n).padStart(2, '0');
     const time_cst = `${bj.getUTCFullYear()}-${pad(bj.getUTCMonth() + 1)}-${pad(bj.getUTCDate())} ${pad(bj.getUTCHours())}:${pad(bj.getUTCMinutes())}`;
-    // 不再截断正文：雪球 timeline 接口返回的就是全文（已实测，最长 1391 字与 show.json 一致）。
     return { id: String(s.id), created_at: ms, time_cst, text: txt };
   });
   console.log(JSON.stringify({ ok: true, count: posts.length, posts }, null, 2));
