@@ -1,0 +1,42 @@
+name: 雪球监控 · 看门狗（独立判活告警）
+
+# 监控主链路自己发的告警，前提是它还能跑。如果链路整体死了（自我接力断了、
+# workflow 被停用、旧 run 全失败），就永远没人告诉你 —— 上次就是这样静默漏抓 4 天。
+# 这个看门狗读仓库里的 health.json（由主循环每轮写入），发现「太久没有成功检查」
+# 就独立发一封告警邮件。
+#
+# ⚠️ 局限：它跑在同一个仓库里。如果整个仓库的 Actions 被停用，它也不会跑。
+#    要覆盖这种情况，再在你自己电脑或任意服务器上跑一份外部看门狗（见部署手册）。
+on:
+  schedule:
+    - cron: '17 * * * *'   # 每小时一次；GitHub cron 不准没关系，看门狗只需 1 小时内跑到
+  workflow_dispatch: {}     # 手动试跑
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 从 Secrets 注入邮箱配置
+        env:
+          QQ_USER: ${{ secrets.QQ_USER }}
+          QQ_PASS: ${{ secrets.QQ_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          mkdir -p xueqiu_sub
+          printf '{"user":"%s","pass":"%s","to":"%s"}' "$QQ_USER" "$QQ_PASS" "$EMAIL_TO" > xueqiu_sub/email.json
+
+      - name: 判活（读仓库内 health.json）
+        env:
+          WATCHDOG_HEALTH_URL: xueqiu_sub/health.json
+          WATCHDOG_STALE_MINUTES: '30'
+        run: node watchdog.mjs --verbose
