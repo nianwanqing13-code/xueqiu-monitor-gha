@@ -1,23 +1,23 @@
 {
-  "updated_at": "2026-10-08T07:11:58.238Z",
+  "updated_at": "2026-10-08T13:13:50.793Z",
   "monitor": {
     "user_id": "3058599833",
     "user_name": "买股票的老木匠"
   },
-  "seen_count": 396,
+  "seen_count": 397,
   "last_fetch_ok": true,
-  "last_run_at": "2026-10-08T07:11:58.236Z",
+  "last_run_at": "2026-10-08T13:13:50.789Z",
   "deliveries": {
-    "total": 121,
+    "total": 122,
     "pending": 0,
-    "sent": 121,
+    "sent": 122,
     "dead": 0,
-    "notified_ids": 150
+    "notified_ids": 151
   },
   "last_error": null,
   "consecutive_failures": 0,
   "source_status": "ok",
-  "last_success_at": "2026-10-08T07:11:58.236Z",
+  "last_success_at": "2026-10-08T13:13:50.790Z",
   "cold_post_hours": 72,
   "last_suppressed_cold": 0
 }
