@@ -1,0 +1,28 @@
+cookie bytes: 4181
+== runner IP ==
+20.62.254.163
+== cookie names ==
+cookiesu,Hm_lvt_1db88642e346389874251b5a1eded6e3,HMACCOUNT,device_id,smidV2,acw_tc,xq_a_token,xqat,xq_id_token,xq_r_token,xq_is_login,u,is_overseas,Hm_lpvt_1db88642e346389874251b5a1eded6e3,acw_tc,.thumbcache_f24b8bbe5a5934237bbc0eda20c1b6e7
+== xq_is_login present ==
+yes value=1
+== HTTP xueqiu.com ==
+status=302
+<html>
+<head><title>302 Found</title><script src="//g.alicdn.com/frontend-lib/frontend-lib/2.3.74/interfaceacting.js"></script><script src="//g.alicdn.com/frontend-lib/frontend-lib/2.3.74/antidom.js"></script><script src="//o.alicdn.com/frontend-lib/common-lib/jquery.min.js"></script></head>
+<body
+== HTTP www.xueqiu.com ==
+status=567
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>访问提示 - 雪球</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: bord
+== browser path ==
+{
+  "ok": false,
+  "reason": "no statuses (WAF blocked or network error)"
+}
