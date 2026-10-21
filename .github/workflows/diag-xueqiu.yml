@@ -1,0 +1,48 @@
+name: 诊断·雪球连通性（临时）
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 注入 cookie
+        env:
+          XUEQIU_COOKIES: ${{ secrets.XUEQIU_COOKIES }}
+        run: |
+          mkdir -p xueqiu_sub
+          printf '%s' "$XUEQIU_COOKIES" > xueqiu_sub/cookies.json
+          echo "cookie file bytes: $(wc -c < xueqiu_sub/cookies.json)"
+
+      - name: 纯 HTTP 探测（主域 vs www）
+        run: |
+          set +e
+          CK=$(node -e "const c=require('./xueqiu_sub/cookies.json');const m=new Map();for(const x of c){if(String(x.domain).includes('xueqiu'))m.set(x.name,x.value)}console.log([...m].map(([k,v])=>k+'='+v).join('; '))")
+          echo "cookie names: $(node -e "const c=require('./xueqiu_sub/cookies.json');console.log(c.map(x=>x.name).join(','))")"
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          for HOST in xueqiu.com www.xueqiu.com; do
+            U="https://$HOST/statuses/user_timeline.json?user_id=3058599833&page=1&size=20&type=status"
+            echo "================ $HOST"
+            curl -sS -D - -o /tmp/b_$HOST.txt -A "$UA" -H "Cookie: $CK" \
+              -H 'X-Requested-With: XMLHttpRequest' -H 'Accept: application/json' \
+              --max-time 25 "$U" | head -25
+            echo "---- body first 400 chars ----"
+            head -c 400 /tmp/b_$HOST.txt; echo
+          done
+
+      - name: 浏览器路径探测（真实跑 fetch_xueqiu.mjs）
+        run: |
+          set +e
+          npm i playwright@1.61.1 --no-audit --no-fund 2>&1 | tail -3
+          npx playwright install chromium 2>&1 | tail -3
+          echo "======== fetch_xueqiu.mjs 输出 ========"
+          timeout 180 node fetch_xueqiu.mjs 2>&1 | head -60
+          echo "======== cookies.json 是否被刷新 ========"
+          wc -c < xueqiu_sub/cookies.json
