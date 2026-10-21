@@ -22,10 +22,13 @@ function loadCookies() {
 }
 
 function cookieHeader(list) {
-  return list
-    .filter(c => typeof c.domain === 'string' && c.domain.includes('xueqiu'))
-    .map(c => `${c.name}=${c.value}`)
-    .join('; ');
+  // 按 cookie 名去重：cookie 文件里 acw_tc 等会同时存在于 xueqiu.com 与 open.xueqiu.com 两个域，
+  // 拼出同名重复 cookie 会被 WAF 判为异常请求（实测直接 400016）。同名只保留最后一个。
+  const map = new Map();
+  for (const c of list) {
+    if (typeof c.domain === 'string' && c.domain.includes('xueqiu')) map.set(c.name, c.value);
+  }
+  return [...map].map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
 function httpGet(url, cookie, timeoutMs = 25000) {
@@ -37,7 +40,7 @@ function httpGet(url, cookie, timeoutMs = 25000) {
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
         'X-Requested-With': 'XMLHttpRequest',
-        'Referer': `https://xueqiu.com/u/${USER_ID}`
+        'Referer': `https://www.xueqiu.com/u/${USER_ID}`
       },
       timeout: timeoutMs
     }, res => {
@@ -54,12 +57,17 @@ function httpGet(url, cookie, timeoutMs = 25000) {
 const cookies = loadCookies();
 let result = { ok: false, reason: 'no cookies' };
 
+// ⚠️ 2026-10-21：主域 xueqiu.com 现在对所有 IP 都 302 到 www.xueqiu.com，
+// 而重定向后的目标直接带 cookie 请求才稳定返回 JSON。所以干脆直接打 www，
+// 少一跳、也避免「302 页 HTML 被当成接口返回」这类误判。
+const BASE = 'https://www.xueqiu.com';
+
 if (cookies.length) {
-  const url = `https://xueqiu.com/statuses/user_timeline.json?user_id=${USER_ID}&page=1&size=20&type=status&_=${Date.now()}`;
+  const url = `${BASE}/statuses/user_timeline.json?user_id=${USER_ID}&page=1&size=20&type=status&_=${Date.now()}`;
   try {
     let r = await httpGet(url, cookieHeader(cookies));
 
-    // 跟随重定向（海外 IP 场景必需，见文件头说明）
+    // 兜底：若仍被重定向，则跟随一次（重带 cookie）
     if (r.status >= 300 && r.status < 400 && r.headers && r.headers.location) {
       const target = new URL(r.headers.location, url).href;
       r = await httpGet(target, cookieHeader(cookies));
@@ -79,7 +87,8 @@ if (cookies.length) {
       });
       result = { ok: true, count: posts.length, posts, via: 'http' };
     } else {
-      result = { ok: false, reason: `http ${r.status} / ${(j && (j.error_code || j.error_description)) || 'non-json (WAF?)'}` };
+      const hint = /_waf_|renderData|captcha/i.test(r.body) ? 'waf-challenge' : 'non-json';
+      result = { ok: false, reason: `http ${r.status} / ${(j && (j.error_code || j.error_description)) || hint}` };
     }
   } catch (e) {
     result = { ok: false, reason: `http error: ${e.message}` };
