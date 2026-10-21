@@ -22,8 +22,13 @@ function saveCookies(cookies) {
 }
 
 async function callApi(page) {
+  // ⚠️ 必须用「相对路径」在同源下请求。
+  // 2026-10-21 定位：页面现在会 302 到 www.xueqiu.com，而这里以前写的是绝对地址
+  // https://xueqiu.com/...，从 www 页面发就是跨域 → 浏览器直接抛 "Failed to fetch"
+  // （CORS 预检不过），于是每次都落到 "no statuses"，浏览器兜底彻底失效。
+  // 改成相对路径后始终跟随当前页面的源，302 到哪都同源。
   const txt = await page.evaluate(async (uid) => {
-    const resp = await fetch(`https://xueqiu.com/statuses/user_timeline.json?user_id=${uid}&page=1&size=20&type=status&_=${Date.now()}`, {
+    const resp = await fetch(`/statuses/user_timeline.json?user_id=${uid}&page=1&size=20&type=status&_=${Date.now()}`, {
       headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
       credentials: 'include'
     });
